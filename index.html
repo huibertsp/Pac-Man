@@ -1,0 +1,1046 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Classic Pac-Man — Server High Scores</title>
+<style>
+  :root{
+    --scale: 1;
+    --tile: 28;
+    --cols: 21;
+    --rows: 23;
+    --width: calc(var(--cols) * var(--tile));
+    --height: calc(var(--rows) * var(--tile));
+    --bg: #000014;
+  }
+  html,body{height:100%;margin:0;font-family:system-ui, -apple-system, "Segoe UI", Roboto, Arial;background:radial-gradient(circle at 20% 10%, #051428 0%, var(--bg) 60%);color:#e6eef6}
+  .wrap{display:flex;gap:20px;align-items:flex-start;justify-content:center;padding:22px;box-sizing:border-box;flex-wrap:wrap}
+  .game{background:linear-gradient(#021029,#00121f);padding:12px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.6)}
+  canvas{display:block;width:calc(var(--width) * var(--scale));height:calc(var(--height) * var(--scale));image-rendering:pixelated;background:#000;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,0.6) inset}
+  .hud{margin-top:8px;display:flex;justify-content:space-between;gap:8px;align-items:center;color:#dbeafe}
+  .left,.center,.right{display:flex;gap:12px;align-items:center}
+  .info{font-size:14px}
+  .lives{display:flex;gap:6px}
+  .button{appearance:none;border:0;background:#1464a5;color:white;padding:8px 12px;border-radius:8px;cursor:pointer;font-weight:600}
+  .button.secondary{background:#203a57}
+  .status{min-width:220px;font-size:13px;color:#bcd6f2}
+  .hint{font-size:12px;opacity:0.85;margin-top:6px;color:#a9c2df}
+  @media (max-width:900px){.wrap{padding:12px} :root{--scale:0.9}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="game" role="application" aria-label="Pac-Man game area">
+    <canvas id="gameCanvas" width="calc(var(--cols) * var(--tile))" height="calc(var(--rows) * var(--tile))"></canvas>
+
+    <div class="hud" aria-hidden="false">
+      <div class="left">
+        <div class="info">Score: <strong id="score">0</strong></div>
+        <div class="info">Level: <strong id="level">1</strong></div>
+      </div>
+
+      <div class="center">
+        <div class="info">Lives:</div>
+        <div class="lives" id="lives"></div>
+      </div>
+
+      <div class="right">
+        <button class="button" id="startPause">Start (Space)</button>
+        <button class="button secondary" id="highsBtn">High Scores</button>
+      </div>
+    </div>
+
+    <div class="hint">Arrow keys to move. Space to start or pause. Local top 10 stored in your browser when server is unavailable.</div>
+  </div>
+
+  <div style="max-width:360px;line-height:1.45">
+    <h2 style="margin:0 0 8px 0">Classic Pac-Man</h2>
+
+    <p style="margin:0 0 12px 0;color:#cfe6ff">
+      Twelve levels. Three lives per play. When you beat a high score, you'll be asked for a name. Top 10 is saved server-side when available.
+    </p>
+
+    <div style="background:#041428;padding:10px;border-radius:8px;margin-bottom:12px;color:#d9eefc">
+      <strong style="display:block;margin-bottom:6px">How to play</strong>
+      <ul style="margin:0 0 0 18px;padding:0;color:#cfe6ff;font-size:13px;line-height:1.4">
+        <li><strong>Move</strong>: Use the Arrow keys (Up, Down, Left, Right) to steer Pac-Man.</li>
+        <li><strong>Start / Pause</strong>: Press the Space bar to start the game or pause and resume during play.</li>
+        <li><strong>Objective</strong>: Eat all the dots to clear the level. Power pellets let you eat frightened ghosts for bonus points.</li>
+        <li><strong>Lives</strong>: You get 3 lives per play. Losing all lives ends the game.</li>
+        <li><strong>High scores</strong>: When you hit a top-10 score, you'll be prompted for a name. Use the High Scores button to view the leaderboard. If the server is unreachable, scores are saved locally until the server is available again.</li>
+      </ul>
+    </div>
+
+    <ul style="margin:0 0 12px 18px;color:#dbeefe">
+      <li>Difficulty rises across 12 levels: ghosts speed up and Pac-Man gets faster.</li>
+      <li>Pac-Man's mouth faces the direction you move him.</li>
+      <li>If your browser lacks required features, you'll see a short compatibility message.</li>
+    </ul>
+
+    <div style="display:flex;gap:8px">
+      <button class="button" id="resetScores">Reset High Scores</button>
+      <button class="button secondary" id="downloadScores">Download Scores</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/*
+  Server high-score integration - client side.
+
+  Summary - step by step:
+  1) Configure SERVER_API below to point to your high-score service base URL.
+     - If SERVER_API is empty string, the client will use same-origin endpoints:
+       GET  /api/highscores     -> returns JSON array [{name,score,date}, ...] sorted desc
+       POST /api/highscores     -> accepts JSON {name,score,date} and returns updated top-10 array
+       DELETE /api/highscores   -> optional: clears stored scores and returns updated (empty) array
+     - Example server responses are in the comments below.
+
+  2) On page load the client reads a local cache (localStorage) synchronously so
+     gameplay and UI do not block. Then it requests the server in the background
+     to refresh the cache. That keeps the existing code flow intact.
+
+  3) When a new high score is saved the client attempts to POST to the server.
+     If the server call succeeds and returns the updated top-10, the client uses that.
+     If the server call fails, the client stores a local copy and will still show
+     a top-10 from localStorage. This keeps the game robust when the server is down
+     or CORS blocks the request.
+
+  4) The high-score UI (popup, download) first shows the local cached list, then
+     updates if the server responds.
+
+  Server API contract (recommended):
+    GET  /api/highscores
+      -> 200 OK
+      -> body: JSON array of objects
+         [ { "name":"Player", "score":12345, "date":"2025-08-22T12:34:56Z" }, ... ]
+      -> Should return items sorted by score descending and limit to top-10.
+
+    POST /api/highscores
+      -> body: { "name":"Player", "score":12345, "date":"2025-08-22T12:34:56Z" }
+      -> 200 OK or 201 Created
+      -> returns updated top-10 list in same format as GET (optional but preferred).
+
+    DELETE /api/highscores
+      -> 200 OK
+      -> returns empty array or confirmation.
+
+  Security notes:
+  - Serve those endpoints over TLS.
+  - Add authentication or rate limiting if you expect heavy traffic.
+  - CORS: allow the origin serving this HTML, or host this HTML on the same origin.
+
+  Implementation notes:
+  - The client uses fetch with a 5-second timeout for server calls.
+  - localStorage key is pacman_highscores_v1; it is used as a fallback cache.
+  - The existing game logic and function signatures are preserved so gameplay is unchanged.
+*/
+
+(() => {
+  'use strict';
+
+  // --------------------------
+  // Configuration
+  // --------------------------
+  // Set this to your server base URL (no trailing slash), or leave blank to use same origin.
+  // Example values:
+  //   const SERVER_API = '';                         // same origin: /api/highscores
+  //   const SERVER_API = 'https://scores.example';  // full URL
+  const SERVER_API = ''; // <-- set your endpoint if you have one
+
+  // Timeout for fetch calls (ms)
+  const FETCH_TIMEOUT_MS = 5000;
+
+  // --------------------------
+  // helper: timed fetch
+  // --------------------------
+  function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
+    if (!window.fetch) return Promise.reject(new Error('fetch not available'));
+    const controller = new AbortController();
+    const signal = controller.signal;
+    const timer = setTimeout(() => controller.abort(), timeout);
+    return fetch(url, Object.assign({}, options, {signal})).finally(() => clearTimeout(timer));
+  }
+
+  // --------------------------
+  // Capability check
+  // --------------------------
+  const required = {
+    canvas: !!document.createElement('canvas').getContext,
+    localStorage: (function(){ try { return 'localStorage' in window && window.localStorage; } catch(e){ return false; } })()
+  };
+
+  function showIncompatibility(msg){
+    const wrap = document.querySelector('.wrap');
+    wrap.innerHTML = `
+      <div style="max-width:900px;padding:40px;background:#111a27;border-radius:12px;color:#ffebd6">
+        <h2>Compatibility issue</h2>
+        <p>${msg}</p>
+        <p style="opacity:0.85">Try updating your browser (Chrome, Edge, Firefox or Safari) or open this page in another browser.</p>
+      </div>`;
+  }
+
+  if (!required.canvas) {
+    showIncompatibility('Your browser does not support HTML canvas, which is required for this game.');
+    return;
+  }
+
+  // --------------------------
+  // Core game config (unchanged)
+  // --------------------------
+  const TILE = 28;
+  const COLS = 21;
+  const ROWS = 23;
+  const CANVAS_WIDTH = COLS * TILE;
+  const CANVAS_HEIGHT = ROWS * TILE;
+
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = CANVAS_WIDTH;
+  canvas.height = CANVAS_HEIGHT;
+
+  // HUD elements
+  const scoreEl = document.getElementById('score');
+  const levelEl = document.getElementById('level');
+  const livesEl = document.getElementById('lives');
+  const startPauseBtn = document.getElementById('startPause');
+  const highsBtn = document.getElementById('highsBtn');
+  const resetScoresBtn = document.getElementById('resetScores');
+  const downloadScoresBtn = document.getElementById('downloadScores');
+
+  // Game state
+  let score = 0;
+  let levelIndex = 0; // 0..11
+  let lives = 3;
+  let running = false;
+  let paused = true;
+  let lastTime = 0;
+
+  const LEVELS = [
+    { name: 'Easy',      ghostSpeed: 0.90, pacSpeed: 1.40, ghosts: 2 },
+    { name: 'Novice',    ghostSpeed: 0.95, pacSpeed: 1.45, ghosts: 2 },
+    { name: 'Apprentice',ghostSpeed: 1.00, pacSpeed: 1.50, ghosts: 2 },
+    { name: 'Challenging',ghostSpeed:1.10, pacSpeed: 1.60, ghosts: 3 },
+    { name: 'Skilled',   ghostSpeed: 1.20, pacSpeed: 1.65, ghosts: 3 },
+    { name: 'Tough',     ghostSpeed: 1.30, pacSpeed: 1.75, ghosts: 3 },
+    { name: 'Hard',      ghostSpeed: 1.40, pacSpeed: 1.85, ghosts: 3 },
+    { name: 'Expert',    ghostSpeed: 1.50, pacSpeed: 1.95, ghosts: 4 },
+    { name: 'Master',    ghostSpeed: 1.60, pacSpeed: 2.05, ghosts: 4 },
+    { name: 'Nightmare', ghostSpeed: 1.70, pacSpeed: 2.15, ghosts: 4 },
+    { name: 'Insane',    ghostSpeed: 1.85, pacSpeed: 2.25, ghosts: 4 },
+    { name: 'Legendary', ghostSpeed: 2.00, pacSpeed: 2.35, ghosts: 4 },
+  ];
+
+  const RAW_MAP = [
+    "111111111111111111111",
+    "100000000100000000001",
+    "101110111101111011101",
+    "102000100000100001201",
+    "101110101110101011101",
+    "100000101000101000001",
+    "111110101110101011111",
+    "000010000100000100000",
+    "111010111101111010111",
+    "100000000000000000001",
+    "101111101111110111101",
+    "100000100300010000001",
+    "101111101111110111101",
+    "100000000000000000001",
+    "111010111101111010111",
+    "000010000100000100000",
+    "111110101110101011111",
+    "100000101000101000001",
+    "101110101110101011101",
+    "102000100000100001201",
+    "101110111101111011101",
+    "100000000100000000001",
+    "111111111111111111111",
+    "000000000000000000000"
+  ];
+
+  const grid = [];
+  for (let r = 0; r < ROWS; r++) {
+    const rowStr = RAW_MAP[r] || "1".repeat(COLS);
+    const row = [];
+    for (let c = 0; c < COLS; c++) {
+      const ch = rowStr[c] || "1";
+      if (ch === "1") row.push(1);
+      else if (ch === "0") row.push(0);
+      else if (ch === "2") row.push(2);
+      else if (ch === "3") row.push(3);
+      else row.push(1);
+    }
+    grid.push(row);
+  }
+
+  // Map / pellet collections
+  const pellets = [];
+  const powerPellets = [];
+  const walls = new Set();
+  let pelletMap = new Map();
+
+  function setupLevelMap(){
+    pellets.length = 0;
+    powerPellets.length = 0;
+    walls.clear();
+    for (let r = 0; r < ROWS; r++){
+      for (let c = 0; c < COLS; c++){
+        const v = grid[r][c];
+        if (v === 1) walls.add(r + "," + c);
+        else if (v === 0) pellets.push({r,c});
+        else if (v === 2) powerPellets.push({r,c});
+      }
+    }
+  }
+
+  function tileToPixelCenter(index){ return index * TILE + TILE / 2; }
+  function pixelToTileIndex(coord){ return Math.floor(coord / TILE); }
+  function isWall(r,c){
+    if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return true;
+    return walls.has(r + ',' + c);
+  }
+
+  // Entities (unchanged)
+  const pac = {
+    r: 0, c: 0,
+    x: 0, y: 0,
+    dir: null,
+    nextDir: null,
+    speed: 1.6,
+    radius: TILE/2 - 2,
+    mouth: 0,
+    alive: true
+  };
+
+  class Ghost {
+    constructor(id, color){
+      this.id = id;
+      this.color = color;
+      this.r = 0; this.c = 0;
+      this.x = 0; this.y = 0;
+      this.dir = 'L';
+      this.speed = 1.0;
+      this.state = 'scatter';
+      this.frightTimer = 0;
+    }
+  }
+
+  let ghosts = [];
+  const pacStart = { r: 17, c: 10 };
+  const ghostStarts = [
+    { r: 11, c: 10 },
+    { r: 10, c: 9 },
+    { r: 10, c: 11 },
+    { r: 11, c: 9 }
+  ];
+
+  function initPellets(){
+    pelletMap = new Map();
+    for (const p of pellets) pelletMap.set(p.r + ',' + p.c, {type:'pellet'});
+    for (const p of powerPellets) pelletMap.set(p.r + ',' + p.c, {type:'power'});
+  }
+
+  function collectPelletAt(r,c){
+    const k = r + ',' + c;
+    if (pelletMap.has(k)){
+      const item = pelletMap.get(k);
+      pelletMap.delete(k);
+      if (item.type === 'pellet') score += 10;
+      else score += 50;
+      if (item.type === 'power'){
+        for (const g of ghosts){
+          g.state = 'frightened';
+          g.frightTimer = 6 * 1000;
+        }
+      }
+      updateHUD();
+      return true;
+    }
+    return false;
+  }
+
+  function pelletsRemaining(){ return pelletMap.size; }
+
+  function resetEntities(){
+    pac.r = pacStart.r; pac.c = pacStart.c;
+    pac.x = tileToPixelCenter(pac.c);
+    pac.y = tileToPixelCenter(pac.r);
+    pac.dir = null; pac.nextDir = null;
+    pac.speed = LEVELS[levelIndex].pacSpeed;
+    pac.mouth = 0;
+    pac.alive = true;
+
+    ghosts = [];
+    const colors = ['#FF4158','#00BFFF','#FFB86B','#AD61FF'];
+    const count = Math.max(1, Math.min(LEVELS[levelIndex].ghosts || 2, 6));
+    for (let i = 0; i < count; i++){
+      const g = new Ghost(i, colors[i % colors.length]);
+      const start = ghostStarts[i % ghostStarts.length];
+      const s = { r: start.r, c: start.c };
+      if (s.r === pac.r && s.c === pac.c) s.c = Math.max(1, s.c - 1);
+      g.r = s.r; g.c = s.c;
+      g.x = tileToPixelCenter(g.c); g.y = tileToPixelCenter(g.r);
+      g.dir = (i % 2 === 0) ? 'L' : 'R';
+      g.speed = LEVELS[levelIndex].ghostSpeed;
+      ghosts.push(g);
+    }
+  }
+
+  function tryChangeDirection(entity, desiredDir){
+    let dr = 0, dc = 0;
+    if (desiredDir === 'L') dc = -1;
+    else if (desiredDir === 'R') dc = 1;
+    else if (desiredDir === 'U') dr = -1;
+    else if (desiredDir === 'D') dr = 1;
+
+    const tileR = pixelToTileIndex(entity.y);
+    const tileC = pixelToTileIndex(entity.x);
+    const targetR = tileR + dr;
+    const targetC = tileC + dc;
+
+    if (!isWall(targetR, targetC)) {
+      entity.dir = desiredDir;
+      return true;
+    }
+    return false;
+  }
+
+  function ghostChooseDir(ghost){
+    const pr = pixelToTileIndex(pac.y);
+    const pc = pixelToTileIndex(pac.x);
+    const gr = pixelToTileIndex(ghost.y);
+    const gc = pixelToTileIndex(ghost.x);
+
+    const moves = [
+      {d:'U',dr:-1,dc:0},
+      {d:'D',dr:1,dc:0},
+      {d:'L',dr:0,dc:-1},
+      {d:'R',dr:0,dc:1}
+    ];
+
+    const candidates = [];
+    for (const m of moves){
+      const nr = gr + m.dr, nc = gc + m.dc;
+      if (isWall(nr, nc)) continue;
+      if (ghost.dir){
+        const rev = (ghost.dir === 'L' && m.d === 'R') || (ghost.dir === 'R' && m.d === 'L') || (ghost.dir === 'U' && m.d === 'D') || (ghost.dir === 'D' && m.d === 'U');
+        if (rev) continue;
+      }
+      let dist = Math.abs(nr - pr) + Math.abs(nc - pc);
+      if (ghost.state === 'frightened') dist = Math.random() * 10;
+      else dist += Math.random() * 0.6;
+      candidates.push({move:m.d,dist});
+    }
+
+    if (candidates.length === 0){
+      if (ghost.dir){
+        const rev = ghost.dir === 'L' ? 'R' : ghost.dir === 'R' ? 'L' : ghost.dir === 'U' ? 'D' : 'U';
+        return rev;
+      }
+      return ghost.dir || 'L';
+    }
+    candidates.sort((a,b) => a.dist - b.dist);
+    return candidates[0].move;
+  }
+
+  // Rendering (unchanged)
+  function drawBackground(){
+    ctx.fillStyle = "#000010";
+    ctx.fillRect(0,0,CANVAS_WIDTH,CANVAS_HEIGHT);
+
+    for (let r=0;r<ROWS;r++){
+      for (let c=0;c<COLS;c++){
+        if (isWall(r,c)){
+          const x = c * TILE, y = r * TILE;
+          ctx.fillStyle = "#052a50";
+          ctx.fillRect(x+1,y+1,TILE-2,TILE-2);
+        }
+      }
+    }
+
+    for (const [k,item] of pelletMap){
+      const [r,c] = k.split(',').map(Number);
+      const cx = c*TILE + TILE/2;
+      const cy = r*TILE + TILE/2;
+      if (item.type === 'pellet'){
+        ctx.beginPath();
+        ctx.fillStyle = "#FFDDB4";
+        ctx.arc(cx,cy,3,0,Math.PI*2);
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.fillStyle = "#FFD24D";
+        ctx.arc(cx,cy,6,0,Math.PI*2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function drawPac(){
+    const x = pac.x, y = pac.y;
+    pac.mouth += 0.18;
+    const mouthOpen = Math.abs(Math.sin(pac.mouth)) * 0.45;
+    const radius = pac.radius;
+    let angleStart = 0, angleEnd = Math.PI*2;
+    if (pac.dir === 'L') { angleStart = Math.PI * (1 + mouthOpen); angleEnd = Math.PI * (1 - mouthOpen); }
+    else if (pac.dir === 'R') { angleStart = Math.PI * (0 + mouthOpen); angleEnd = Math.PI * (2 - mouthOpen); }
+    else if (pac.dir === 'U') { angleStart = Math.PI * (1.5 + mouthOpen); angleEnd = Math.PI * (0.5 - mouthOpen); }
+    else if (pac.dir === 'D') { angleStart = Math.PI * (0.5 + mouthOpen); angleEnd = Math.PI * (1.5 - mouthOpen); }
+    else { angleStart = Math.PI * (0 + mouthOpen); angleEnd = Math.PI * (2 - mouthOpen); }
+
+    ctx.beginPath();
+    ctx.fillStyle = "#FFEB3B";
+    ctx.moveTo(x,y);
+    ctx.arc(x,y,radius,angleStart,angleEnd,false);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.fillStyle = "#222";
+    let ex = x + (pac.dir === 'L' ? -radius*0.3 : radius*0.2);
+    let ey = y - radius*0.45;
+    ctx.arc(ex,ey,Math.max(2, radius*0.14),0,Math.PI*2);
+    ctx.fill();
+  }
+
+  function drawGhost(g){
+    const x = g.x, y = g.y;
+    const r = TILE/2 - 2;
+    ctx.beginPath();
+    ctx.fillStyle = g.state === 'frightened' ? '#6fb3ff' : g.color;
+    ctx.moveTo(x - r, y);
+    ctx.arc(x, y - r/2, r, Math.PI, 0, false);
+    ctx.rect(x + r, y, -2*r, r);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.fillStyle = g.state === 'frightened' ? '#7fc8ff' : g.color;
+    ctx.moveTo(x - r, y + r*0.9);
+    const scallop = 4;
+    for (let i = 0; i <= scallop; i++){
+      const sx = x - r + (i * (2*r / scallop));
+      ctx.lineTo(sx, y + r*0.9 - ((i%2)?3:0));
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.fillStyle = '#fff';
+    ctx.ellipse(x - r*0.35, y - r*0.1, r*0.25, r*0.2, 0,0,Math.PI*2);
+    ctx.ellipse(x + r*0.15, y - r*0.1, r*0.25, r*0.2, 0,0,Math.PI*2);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.fillStyle = '#000';
+    let px = 0, py = 0;
+    if (g.dir === 'L') px = -r*0.12;
+    if (g.dir === 'R') px = r*0.12;
+    if (g.dir === 'U') py = -r*0.08;
+    if (g.dir === 'D') py = r*0.08;
+    ctx.ellipse(x - r*0.35 + px, y - r*0.1 + py, r*0.12, r*0.12, 0,0,Math.PI*2);
+    ctx.ellipse(x + r*0.15 + px, y - r*0.1 + py, r*0.12, r*0.12, 0,0,Math.PI*2);
+    ctx.fill();
+  }
+
+  function updateHUD(){
+    scoreEl.textContent = score;
+    levelEl.textContent = (levelIndex+1) + ' - ' + LEVELS[levelIndex].name;
+    livesEl.innerHTML = '';
+    for (let i=0;i<lives;i++){
+      const span = document.createElement('span');
+      span.title = 'Life';
+      span.style.display = 'inline-block';
+      span.style.width = '18px';
+      span.style.height = '18px';
+      span.style.background = 'radial-gradient(circle at 35% 30%, #fff, #ffd54f 30%, #ffca28 60%, transparent 70%)';
+      span.style.borderRadius = '50%';
+      livesEl.appendChild(span);
+    }
+  }
+
+  // --------------------------
+  // High score storage - server-first with local fallback
+  // --------------------------
+  const HS_KEY = 'pacman_highscores_v1';
+  // in-memory cache used by synchronous callers
+  window.__pac_hs_cache = window.__pac_hs_cache || null;
+
+  // refresh cached highs from server (async)
+  async function refreshHighScoresFromServer() {
+    if (!SERVER_API) {
+      // Using same-origin path
+      const url = '/api/highscores';
+      return fetchServerHighScores(url);
+    } else {
+      return fetchServerHighScores(SERVER_API + '/api/highscores');
+    }
+  }
+
+  async function fetchServerHighScores(url) {
+    if (!window.fetch) return;
+    try {
+      const res = await fetchWithTimeout(url, { method: 'GET', headers: {'Accept':'application/json'} }, FETCH_TIMEOUT_MS);
+      if (!res.ok) throw new Error('Server returned ' + res.status);
+      const json = await res.json();
+      if (Array.isArray(json)) {
+        const trimmed = json.slice(0,10).map(validateHighScoreItem).filter(Boolean);
+        window.__pac_hs_cache = trimmed;
+        if (required.localStorage) {
+          try { localStorage.setItem(HS_KEY, JSON.stringify(trimmed)); } catch(e){ /* ignore */ }
+        }
+      }
+    } catch (e) {
+      // server not reachable or invalid response - keep local cache
+      console.warn('High-score server fetch failed:', e.message || e);
+    }
+  }
+
+  function validateHighScoreItem(it) {
+    if (!it) return null;
+    const name = String(it.name || 'Anonymous').slice(0, 40);
+    const scoreVal = Number(it.score) || 0;
+    const date = it.date ? String(it.date) : new Date().toISOString();
+    return {name, score: scoreVal, date};
+  }
+
+  // Synchronous loader used across game logic - returns cached list (never a promise)
+  function loadHighScores() {
+    // if cache present return it
+    if (Array.isArray(window.__pac_hs_cache)) return window.__pac_hs_cache;
+
+    // otherwise load from localStorage synchronously
+    let cached = [];
+    if (required.localStorage) {
+      try {
+        const raw = localStorage.getItem(HS_KEY);
+        cached = raw ? JSON.parse(raw) : [];
+      } catch (e) {
+        cached = [];
+      }
+    }
+    window.__pac_hs_cache = cached;
+    // refresh from server in background
+    refreshHighScoresFromServer().catch(()=>{});
+    return window.__pac_hs_cache;
+  }
+
+  // Save high score - attempt server first, but always fall back to local storage
+  function saveHighScore(entry) {
+    // Sanitize entry
+    const rec = validateHighScoreItem(entry);
+    // update local cache immediately so UI is responsive
+    const list = loadHighScores().slice();
+    list.push(rec);
+    list.sort((a,b)=>b.score - a.score);
+    const trimmed = list.slice(0,10);
+    window.__pac_hs_cache = trimmed;
+    if (required.localStorage) {
+      try { localStorage.setItem(HS_KEY, JSON.stringify(trimmed)); } catch(e){/* ignore */ }
+    }
+
+    // Fire-and-forget server call to persist
+    (async () => {
+      const payload = rec;
+      const url = SERVER_API ? (SERVER_API + '/api/highscores') : '/api/highscores';
+      try {
+        const res = await fetchWithTimeout(url, {
+          method: 'POST',
+          headers: {'Content-Type':'application/json','Accept':'application/json'},
+          body: JSON.stringify(payload)
+        }, FETCH_TIMEOUT_MS);
+        if (!res.ok) {
+          // server error - just log and keep local cache
+          console.warn('Failed to save high score to server:', res.status);
+          return;
+        }
+        // optional: server may return updated list
+        try {
+          const json = await res.json();
+          if (Array.isArray(json)) {
+            const trimmedServer = json.slice(0,10).map(validateHighScoreItem).filter(Boolean);
+            window.__pac_hs_cache = trimmedServer;
+            if (required.localStorage) {
+              try { localStorage.setItem(HS_KEY, JSON.stringify(trimmedServer)); } catch(e){/* ignore */ }
+            }
+          }
+        } catch(e) {
+          // no JSON or parsing error - ignore
+        }
+      } catch(e) {
+        console.warn('Network error saving high score to server:', e.message || e);
+        // keep local cache, we'll sync when server is available
+      }
+    })();
+  }
+
+  // Reset high scores - local and server
+  function resetHighScores(){
+    if (!confirm('Reset saved high scores? This cannot be undone.')) return;
+    // local
+    if (required.localStorage) {
+      try { localStorage.removeItem(HS_KEY); } catch(e){ /* ignore */ }
+    }
+    window.__pac_hs_cache = [];
+    // try server delete (fire-and-forget)
+    (async () => {
+      const url = SERVER_API ? (SERVER_API + '/api/highscores') : '/api/highscores';
+      try {
+        const res = await fetchWithTimeout(url, { method: 'DELETE', headers: {'Accept':'application/json'} }, FETCH_TIMEOUT_MS);
+        if (!res.ok) console.warn('Server failed to reset highscores:', res.status);
+        else {
+          try {
+            const json = await res.json();
+            if (Array.isArray(json)) {
+              window.__pac_hs_cache = json.slice(0,10).map(validateHighScoreItem).filter(Boolean);
+              if (required.localStorage) localStorage.setItem(HS_KEY, JSON.stringify(window.__pac_hs_cache));
+            }
+          } catch(e){ /* ignore */ }
+        }
+      } catch(e) {
+        console.warn('Failed to reset high scores on server:', e.message || e);
+      }
+    })();
+    alert('High scores reset locally. Server reset attempted if available.');
+  }
+
+  // Download highs - tries server first for freshest data, falls back to cache
+  async function downloadHighScores(){
+    let list = loadHighScores().slice();
+    // try server
+    try {
+      const url = SERVER_API ? (SERVER_API + '/api/highscores') : '/api/highscores';
+      const res = await fetchWithTimeout(url, {method:'GET', headers:{'Accept':'application/json'}}, FETCH_TIMEOUT_MS);
+      if (res.ok) {
+        const json = await res.json();
+        if (Array.isArray(json)) {
+          list = json.slice(0,10).map(validateHighScoreItem).filter(Boolean);
+        }
+      }
+    } catch (e) {
+      // ignore and use local cache
+      console.warn('Download: server fetch failed, using local cache.');
+    }
+    const blob = new Blob([JSON.stringify(list, null, 2)], {type:'application/json'});
+    const urlObj = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = urlObj;
+    a.download = 'pacman_highscores.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(urlObj);
+  }
+
+  // Open popup with highs - shows cached list immediately, updates if server returns data
+  function openHighScorePopup(){
+    const list = loadHighScores().slice();
+    const popup = window.open('', 'pacman_highscores', 'width=420,height=520,toolbar=0,menubar=0,status=0');
+    if (!popup) {
+      alert('Popup blocked. Allow popups to see high scores.');
+      return;
+    }
+    function render(listToRender){
+      return `<!doctype html><html><head><meta charset="utf-8"><title>Top 10 High Scores</title>
+        <style>body{font-family:system-ui;padding:16px;background:#001225;color:#e8f4ff}h1{margin-top:0}
+        table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid rgba(255,255,255,0.06)}
+        .small{color:#c6e0ff;font-size:12px}</style></head><body>
+        <h1>Top 10 High Scores</h1>
+        <table><tr><th>#</th><th>Name</th><th>Score</th><th class="small">Date</th></tr>
+        ${listToRender.map((e,i)=>`<tr><td>${i+1}</td><td>${escapeHtml(e.name)}</td><td>${e.score}</td><td class="small">${new Date(e.date).toLocaleString()}</td></tr>`).join('')}
+        </table>
+        <p style="margin-top:12px;"><button onclick="window.close()">Close</button></p>
+        </body></html>`;
+    }
+    popup.document.open();
+    popup.document.write(render(list));
+    popup.document.close();
+
+    // Attempt a server refresh and update popup if it returns a different list
+    (async () => {
+      try {
+        const url = SERVER_API ? (SERVER_API + '/api/highscores') : '/api/highscores';
+        const res = await fetchWithTimeout(url, {method:'GET', headers:{'Accept':'application/json'}}, FETCH_TIMEOUT_MS);
+        if (!res.ok) return;
+        const json = await res.json();
+        if (Array.isArray(json)) {
+          const trimmed = json.slice(0,10).map(validateHighScoreItem).filter(Boolean);
+          window.__pac_hs_cache = trimmed;
+          if (required.localStorage) {
+            try { localStorage.setItem(HS_KEY, JSON.stringify(trimmed)); } catch(e){/* ignore */ }
+          }
+          // update popup if still open
+          if (!popup.closed) {
+            popup.document.open();
+            popup.document.write(render(trimmed));
+            popup.document.close();
+          }
+        }
+      } catch (e) {
+        // server unreachable - nothing to do
+      }
+    })();
+  }
+
+  function escapeHtml(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  // --------------------------
+  // Remaining game logic unchanged
+  // --------------------------
+  function checkPacCollisions(){
+    const pr = pixelToTileIndex(pac.y);
+    const pc = pixelToTileIndex(pac.x);
+    collectPelletAt(pr,pc);
+
+    for (const g of ghosts){
+      const dist = Math.hypot(g.x - pac.x, g.y - pac.y);
+      if (dist < TILE*0.7){
+        if (g.state === 'frightened'){
+          score += 200;
+          g.state = 'eaten';
+          const home = ghostStarts[g.id % ghostStarts.length];
+          g.r = home.r; g.c = home.c;
+          g.x = tileToPixelCenter(g.c); g.y = tileToPixelCenter(g.r);
+          g.dir = 'U';
+          updateHUD();
+        } else if (g.state !== 'eaten'){
+          loseLife();
+        }
+      }
+    }
+  }
+
+  function loseLife(){
+    lives--;
+    updateHUD();
+    if (lives <= 0) gameOver();
+    else {
+      paused = true;
+      running = true;
+      startPauseBtn.textContent = 'Resume (Space)';
+      resetEntities();
+    }
+  }
+
+  function levelComplete(){
+    if (levelIndex < LEVELS.length - 1){
+      levelIndex++;
+      lives = Math.min(5, lives + 1);
+      setupLevel();
+    } else {
+      setTimeout(()=>{
+        alert('Congratulations - you completed all 12 levels! The game will continue at the highest difficulty.');
+        lives = Math.min(5, lives + 1);
+        setupLevel();
+      }, 80);
+    }
+  }
+
+  function gameOver(){
+    paused = true;
+    running = false;
+    startPauseBtn.textContent = 'Start (Space)';
+    const hs = loadHighScores();
+    const lowest = hs.length < 10 ? 0 : hs[hs.length-1].score;
+    if (hs.length < 10 || score > lowest){
+      setTimeout(()=>{
+        let name = prompt('New high score! Enter your name (max 20 chars):','Player');
+        if (name === null) name = 'Anonymous';
+        name = String(name).slice(0,20);
+        saveHighScore({name, score, date: new Date().toISOString()});
+        alert('High score saved.');
+      }, 80);
+    } else {
+      alert('Game over. Try again to get a high score.');
+    }
+    setTimeout(()=> {
+      score = 0;
+      levelIndex = 0;
+      lives = 3;
+      setupLevel();
+      updateHUD();
+      drawBackground();
+      drawPac();
+    }, 200);
+  }
+
+  function setupLevel(){
+    try {
+      setupLevelMap();
+      initPellets();
+      resetEntities();
+      updateHUD();
+      running = false;
+      paused = true;
+      startPauseBtn.textContent = 'Start (Space)';
+      drawFrame();
+    } catch (e){
+      console.error('Failed to setup level', e);
+      showIncompatibility('An unexpected error occurred while setting up the game.');
+    }
+  }
+
+  // Input handling unchanged
+  window.addEventListener('keydown', (e) => {
+    if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key) || [37,38,39,40,32].includes(e.keyCode)) {
+      e.preventDefault();
+    }
+
+    if (e.keyCode === 32) { // space
+      if (!running){
+        running = true; paused = false; startPauseBtn.textContent = 'Pause (Space)'; lastTime = performance.now(); requestAnimationFrame(loop);
+      } else {
+        paused = !paused; startPauseBtn.textContent = paused ? 'Resume (Space)' : 'Pause (Space)'; lastTime = performance.now(); if (!paused) requestAnimationFrame(loop);
+      }
+      return;
+    }
+
+    const dir = keyToDir(e.keyCode);
+    if (dir) pac.nextDir = dir;
+  });
+
+  function keyToDir(keyCode){
+    switch(keyCode){
+      case 37: return 'L';
+      case 38: return 'U';
+      case 39: return 'R';
+      case 40: return 'D';
+    }
+    return null;
+  }
+
+  startPauseBtn.addEventListener('click', () => {
+    if (!running){
+      running = true; paused = false; startPauseBtn.textContent = 'Pause (Space)'; lastTime = performance.now(); requestAnimationFrame(loop);
+    } else {
+      paused = !paused; startPauseBtn.textContent = paused ? 'Resume (Space)' : 'Pause (Space)'; lastTime = performance.now(); if (!paused) requestAnimationFrame(loop);
+    }
+  });
+
+  highsBtn.addEventListener('click', openHighScorePopup);
+  resetScoresBtn.addEventListener('click', () => {
+    resetHighScores();
+  });
+  downloadScoresBtn.addEventListener('click', downloadHighScores);
+
+  function updatePac(deltaSec){
+    if (pac.nextDir){
+      const remainderX = (pac.x - TILE/2) % TILE;
+      const remainderY = (pac.y - TILE/2) % TILE;
+      const closeToCenter = Math.abs(remainderX) < 4 && Math.abs(remainderY) < 4;
+      if (closeToCenter){
+        tryChangeDirection(pac, pac.nextDir);
+        pac.nextDir = null;
+      }
+    }
+
+    if (!pac.dir) return;
+
+    const s = pac.speed * TILE * deltaSec;
+    let dx = 0, dy = 0;
+    if (pac.dir === 'L') dx = -s;
+    if (pac.dir === 'R') dx = s;
+    if (pac.dir === 'U') dy = -s;
+    if (pac.dir === 'D') dy = s;
+
+    const newX = pac.x + dx;
+    const newY = pac.y + dy;
+
+    const targetTileR = pixelToTileIndex(pac.y) + (dy > 0 ? 1 : dy < 0 ? -1 : 0);
+    const targetTileC = pixelToTileIndex(pac.x) + (dx > 0 ? 1 : dx < 0 ? -1 : 0);
+
+    if (!isWall(targetTileR, targetTileC)) {
+      pac.x = newX;
+      pac.y = newY;
+    } else {
+      pac.x = Math.floor(pac.x / TILE) * TILE + TILE/2;
+      pac.y = Math.floor(pac.y / TILE) * TILE + TILE/2;
+      pac.dir = null;
+    }
+  }
+
+  function updateGhosts(deltaSec){
+    for (const g of ghosts){
+      if (g.frightTimer > 0){
+        g.frightTimer -= deltaSec * 1000;
+        if (g.frightTimer <= 0) g.state = 'chase';
+      }
+      if (!g.dir || Math.random() < 0.02){
+        g.dir = ghostChooseDir(g);
+      }
+      const s = g.speed * TILE * deltaSec;
+      let dx = 0, dy = 0;
+      if (g.dir === 'L') dx = -s;
+      if (g.dir === 'R') dx = s;
+      if (g.dir === 'U') dy = -s;
+      if (g.dir === 'D') dy = s;
+
+      const targetTileR = pixelToTileIndex(g.y) + (dy > 0 ? 1 : dy < 0 ? -1 : 0);
+      const targetTileC = pixelToTileIndex(g.x) + (dx > 0 ? 1 : dx < 0 ? -1 : 0);
+
+      if (!isWall(targetTileR, targetTileC)) {
+        g.x += dx; g.y += dy;
+      } else {
+        g.dir = ghostChooseDir(g);
+        g.x = Math.floor(g.x / TILE) * TILE + TILE/2;
+        g.y = Math.floor(g.y / TILE) * TILE + TILE/2;
+      }
+    }
+  }
+
+  function drawFrame(){
+    drawBackground();
+    for (const g of ghosts) drawGhost(g);
+    drawPac();
+  }
+
+  function loop(now){
+    if (!running) return;
+    if (paused) return;
+    const dt = Math.min(40, now - lastTime);
+    lastTime = now;
+    const deltaSec = dt / 1000;
+
+    updatePac(deltaSec);
+    updateGhosts(deltaSec);
+    checkPacCollisions();
+
+    if (pelletsRemaining() === 0) levelComplete();
+
+    drawFrame();
+    requestAnimationFrame(loop);
+  }
+
+  // Initialization - also trigger initial high-score refresh
+  try {
+    setupLevel();
+    drawFrame();
+    updateHUD();
+    running = false;
+    paused = true;
+    // initial background refresh of highs from server
+    refreshHighScoresFromServer().catch(()=>{});
+  } catch (e){
+    console.error('Initialization error', e);
+    showIncompatibility('An unexpected error occurred initializing the game. Please try another browser or update this one.');
+  }
+
+  // Public debug helpers
+  window.__pacman = {
+    reset: () => setupLevel(),
+    getHighScores: loadHighScores,
+    saveHighScore,
+    ctx
+  };
+
+  window.addEventListener('beforeunload', (e)=>{
+    if (running && !paused){
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
+
+})();
+</script>
+</body>
+</html>
